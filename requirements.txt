@@ -1,0 +1,5 @@
+panel
+polars
+pyarrow
+holoviews
+bokeh
