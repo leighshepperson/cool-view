@@ -2,6 +2,7 @@ import pandas as pd
 import polars as pl
 import panel as pn
 import holoviews as hv
+import hvplot.pandas  # important for hvplot on pandas DataFrames
 from holoviews import opts
 import random
 from datetime import datetime, timedelta
@@ -9,7 +10,9 @@ from datetime import datetime, timedelta
 pn.extension(sizing_mode="stretch_width")
 hv.extension('bokeh')
 
-
+###############################
+# 1) Generate sample dataframe
+###############################
 def generate_full_df():
     random.seed(42)
     start_date = datetime.today() - timedelta(days=365*5)
@@ -41,13 +44,17 @@ def generate_full_df():
                     "G": random.uniform(1.0, 100.0),
                     "H": random.uniform(1.0, 100.0)
                 })
+
+    # Return a polars DataFrame with columns G,H as cumulative sums grouped by region/C/D/A
     return pl.DataFrame(data_list).with_columns(
         pl.col("G").cum_sum().over("region", "C", "D", "A").alias("G"),
         pl.col("H").cum_sum().over("region", "C", "D", "A").alias("H")
     )
 
 
-# Example chart config: E and F as bar, G and H as line
+###############################
+# 2) Chart Config + Axis Config
+###############################
 CHART_CONFIG = {
     "E": "bar",
     "F": "bar",
@@ -55,7 +62,17 @@ CHART_CONFIG = {
     "H": "line"
 }
 
+AXIS_CONFIG = {
+    "E": "left",
+    "F": "left",
+    "G": "right",
+    "H": "right",
+}
 
+
+###############################
+# 3) FilterSelectors
+###############################
 class FilterSelectors(pn.viewable.Viewer):
     def __init__(self, df, on_change=None):
         self.df = df
@@ -174,6 +191,9 @@ class FilterSelectors(pn.viewable.Viewer):
         }
 
 
+###############################
+# 4) TableView
+###############################
 class TableView(pn.viewable.Viewer):
     def __init__(self, df, filter_selectors):
         self.df = df
@@ -213,16 +233,18 @@ class TableView(pn.viewable.Viewer):
         self.table.value = df_pandas
 
 
+###############################
+# 5) ChartView with Multi-Axis
+###############################
 class ChartView(pn.viewable.Viewer):
     def __init__(self, df, filter_selectors):
         self.df = df
         self.filter_selectors = filter_selectors
 
-        # Only lines or bars are chosen from CHART_CONFIG in code
         self.selector = pn.widgets.MultiChoice(
             name='Columns',
             options=['E', 'F', 'G', 'H'],
-            value=['E', 'F'],
+            value=['E', 'F', 'G', 'H'],  # default: show everything
             placeholder='Pick columns...'
         )
         self.split_charts_checkbox = pn.widgets.Checkbox(name="Split Charts", value=False)
@@ -275,83 +297,103 @@ class ChartView(pn.viewable.Viewer):
         group_cols = ["region", "C", "D", "A"]
         grouped = df_pandas.groupby(group_cols)
 
-        plots = []
+        default_opts = dict(
+            legend='right',
+            width=800,
+            height=400
+        )
+
+        def build_overlay_for_axis(group_data, columns, side='left', group_label=""):
+            subplots = []
+            for col in columns:
+                chart_type = CHART_CONFIG.get(col, "line")
+                label_str = f"{col} {group_label}"
+                if chart_type == "bar":
+                    chart_obj = group_data.hvplot.bar(
+                        x='date', y=col, label=label_str, **default_opts
+                    )
+                else:
+                    chart_obj = group_data.hvplot.line(
+                        x='date', y=col, label=label_str, **default_opts
+                    )
+                subplots.append(chart_obj)
+
+            if not subplots:
+                return None
+            overlay = hv.Overlay(subplots)
+            if side == 'right':
+                overlay = overlay.opts(yaxis='right')
+            return overlay
+
         if split_charts:
-            # Stack each group in its own vertical cell
+            plots = []
             for group_keys, group_data in grouped:
                 region_val, c_val, d_val, a_val = group_keys
+                group_label = f"in {region_val}, {c_val}, {d_val}, {a_val}"
 
-                subplots = []
-                for col in selected_columns:
-                    chart_type = CHART_CONFIG.get(col, "line")  # default to line if not specified
-                    label_str = f"{col} in {region_val}, {c_val}, {d_val}, {a_val}"
+                left_cols = [col for col in selected_columns if AXIS_CONFIG.get(col) == 'left']
+                right_cols = [col for col in selected_columns if AXIS_CONFIG.get(col) == 'right']
 
-                    if chart_type == "bar":
-                        bars = hv.Bars((group_data["date"], group_data[col]),
-                                       kdims=['date'], vdims=[col])
-                        bars = bars.relabel(label_str).opts(
-                            width=1000,
-                            height=250,
-                        )
-                        subplots.append(bars)
-                    else:
-                        curve = hv.Curve((group_data["date"], group_data[col]))
-                        curve = curve.relabel(label_str).opts(
-                            width=1000,
-                            height=250,
-                        )
-                        subplots.append(curve)
+                left_overlay = build_overlay_for_axis(group_data, left_cols, side='left', group_label=group_label)
+                right_overlay = build_overlay_for_axis(group_data, right_cols, side='right', group_label=group_label)
 
-                overlay = hv.Overlay(subplots).opts(
+                if left_overlay and right_overlay:
+                    final_overlay = left_overlay * right_overlay
+                elif left_overlay:
+                    final_overlay = left_overlay
+                elif right_overlay:
+                    final_overlay = right_overlay
+                else:
+                    continue
+
+                final_overlay = final_overlay.opts(
                     title=f"{region_val}, {c_val}, {d_val}, {a_val}",
-                    legend_position='top_left',
-                    # removed responsive=True so the charts do not stretch
+                    click_policy='hide',
+                    legend_position='right'
                 )
-                plots.append(overlay)
+                plots.append(final_overlay)
 
             layout = hv.Layout(plots).cols(1)
-            # Return with a fixed width so charts remain at your chosen width
             return pn.Column(
                 pn.panel(layout, css_classes=['chart-panel'], width=1100),
-                pn.Spacer(height=600, sizing_mode="fixed"),  # dummy scroll space
+                pn.Spacer(height=600, sizing_mode="fixed"),
                 sizing_mode="fixed",
                 width=1150
             )
 
         else:
-            # One big overlay
-            overlay = hv.Overlay([])
+            overlay_left = hv.Overlay([])
+            overlay_right = hv.Overlay([])
+
             for group_keys, group_data in grouped:
                 region_val, c_val, d_val, a_val = group_keys
-                for col in selected_columns:
-                    label_str = f"{region_val} | {c_val} | {d_val} | {a_val} | {col}"
-                    chart_type = CHART_CONFIG.get(col, "line")
+                group_label = f"| {region_val} | {c_val} | {d_val} | {a_val}"
 
-                    if chart_type == "bar":
-                        bars = hv.Bars((group_data["date"], group_data[col]),
-                                       kdims=['date'], vdims=[col])
-                        bars = bars.relabel(label_str).opts(
-                            width=800,
-                            height=400
-                        )
-                        overlay *= bars
-                    else:
-                        curve = hv.Curve((group_data["date"], group_data[col]))
-                        curve = curve.relabel(label_str).opts(
-                            width=800,
-                            height=400
-                        )
-                        overlay *= curve
+                left_cols = [col for col in selected_columns if AXIS_CONFIG.get(col) == 'left']
+                right_cols = [col for col in selected_columns if AXIS_CONFIG.get(col) == 'right']
 
-            overlay = overlay.opts(
-                title="Combined Chart",
-                legend_position="top_left",
-                # also removed responsive=True here
+                left_sub = build_overlay_for_axis(group_data, left_cols, side='left', group_label=group_label)
+                if left_sub:
+                    overlay_left *= left_sub
+
+                right_sub = build_overlay_for_axis(group_data, right_cols, side='right', group_label=group_label)
+                if right_sub:
+                    overlay_right *= right_sub
+
+            final_left = overlay_left
+            final_right = overlay_right.opts(yaxis='right')
+
+            final_overlay = final_left * final_right
+            final_overlay = final_overlay.opts(
+                title="Combined Chart (Multi-Axis)",
+                click_policy='hide',
+                legend_position="right",
                 min_height=400
             )
+
             return pn.Column(
-                pn.panel(overlay, sizing_mode="stretch_width", css_classes=['chart-panel']),
-                pn.Spacer(height=600, sizing_mode="fixed"),  # dummy scroll space
+                pn.panel(final_overlay, css_classes=['chart-panel'], sizing_mode="stretch_width"),
+                pn.Spacer(height=600, sizing_mode="fixed"),
                 sizing_mode="stretch_width"
             )
 
@@ -359,15 +401,183 @@ class ChartView(pn.viewable.Viewer):
         self.view[-1] = self.create_plot_view()
 
 
+###############################
+# 6) Additional Gallery View
+###############################
+class GalleryView(pn.viewable.Viewer):
+    """
+    A 'Gallery' tab of charts to showcase E, F, G, H in different ways.
+    These charts also depend on the same filters.
+    """
+    def __init__(self, df, filter_selectors):
+        self.df = df
+        self.filter_selectors = filter_selectors
+
+        # We'll build a grid of charts (2x2 for demonstration).
+        self.view = pn.Column(
+            self.build_gallery(),
+            sizing_mode="stretch_both"
+        )
+
+        # Watch the filters; rebuild charts if any filter changes
+        self.filter_selectors.region_selector.param.watch(self.update_gallery, 'value')
+        self.filter_selectors.C_selector.param.watch(self.update_gallery, 'value')
+        self.filter_selectors.D_selector.param.watch(self.update_gallery, 'value')
+        self.filter_selectors.A_selector.param.watch(self.update_gallery, 'value')
+        self.filter_selectors.date_range_picker.param.watch(self.update_gallery, 'value')
+
+    def build_gallery(self):
+        """
+        Create a grid of different chart types: line, bar, histogram, scatter, etc.
+        """
+        filters = self.filter_selectors.get_filters()
+        filtered_df = self.df
+
+        if filters['region']:
+            filtered_df = filtered_df.filter(pl.col('region').is_in(filters['region']))
+        if filters['C']:
+            filtered_df = filtered_df.filter(pl.col('C').is_in(filters['C']))
+        if filters['D']:
+            filtered_df = filtered_df.filter(pl.col('D').is_in(filters['D']))
+        if filters['A']:
+            filtered_df = filtered_df.filter(pl.col('A').is_in(filters['A']))
+
+        date_start, date_end = filters['date_range']
+        if date_start and date_end:
+            filtered_df = filtered_df.filter(
+                (pl.col('date') >= pl.lit(date_start)) & (pl.col('date') <= pl.lit(date_end))
+            )
+
+        if filtered_df.is_empty():
+            return pn.pane.Markdown(
+                "No data to display in Gallery.",
+                sizing_mode="stretch_width",
+                css_classes=['no-data']
+            )
+
+        df_pandas = filtered_df.to_pandas()
+
+        # We’ll create four example charts:
+        chart1 = df_pandas.hvplot.line(
+            x='date', y='E', title="Line Chart of E over Time",
+            width=500, height=300, legend='top'
+        )
+        chart2 = df_pandas.hvplot.bar(
+            x='date', y='F', title="Bar Chart of F over Time",
+            width=500, height=300, legend='top'
+        )
+        chart3 = df_pandas.hvplot.hist(
+            y='G', bins=30, title="Histogram of G",
+            width=500, height=300, legend='top'
+        )
+        chart4 = df_pandas.hvplot.scatter(
+            x='E', y='H', title="Scatter of E vs. H",
+            width=500, height=300, legend='top'
+        )
+
+        # Combine them in a 2x2 grid layout
+        grid = pn.GridSpec(ncols=2, nrows=2, sizing_mode='stretch_both')
+        grid[0, 0] = chart1.opts(toolbar='above')
+        grid[0, 1] = chart2.opts(toolbar='above')
+        grid[1, 0] = chart3.opts(toolbar='above')
+        grid[1, 1] = chart4.opts(toolbar='above')
+
+        return grid
+
+    def update_gallery(self, *events):
+        self.view[0] = self.build_gallery()
+
+
+class ExplorerView(pn.viewable.Viewer):
+    """
+    A dynamic Explorer tab using hvplot.explorer.
+    It only activates when all selectors have at least one selected item.
+    """
+    def __init__(self, df, filter_selectors):
+        self.df = df
+        self.filter_selectors = filter_selectors
+        self.view = pn.Column(
+            self.build_explorer(),
+            sizing_mode="stretch_both"
+        )
+
+        # Watch the filters; rebuild explorer if any filter changes
+        self.filter_selectors.region_selector.param.watch(self.update_explorer, 'value')
+        self.filter_selectors.C_selector.param.watch(self.update_explorer, 'value')
+        self.filter_selectors.D_selector.param.watch(self.update_explorer, 'value')
+        self.filter_selectors.A_selector.param.watch(self.update_explorer, 'value')
+        self.filter_selectors.date_range_picker.param.watch(self.update_explorer, 'value')
+
+    def build_explorer(self):
+        """
+        Generate an hvplot explorer view dynamically based on the selected filters.
+        """
+        filters = self.filter_selectors.get_filters()
+
+        # Check if all selectors have a selected value
+        if not (filters['region'] and filters['C'] and filters['D'] and filters['A']):
+            return pn.pane.Markdown(
+                "Select at least one value for each filter to activate the Explorer.",
+                css_classes=['no-data'],
+                sizing_mode="stretch_width"
+            )
+
+        # Filter the DataFrame
+        filtered_df = self.df
+        if filters['region']:
+            filtered_df = filtered_df.filter(pl.col('region').is_in(filters['region']))
+        if filters['C']:
+            filtered_df = filtered_df.filter(pl.col('C').is_in(filters['C']))
+        if filters['D']:
+            filtered_df = filtered_df.filter(pl.col('D').is_in(filters['D']))
+        if filters['A']:
+            filtered_df = filtered_df.filter(pl.col('A').is_in(filters['A']))
+        date_start, date_end = filters['date_range']
+        if date_start and date_end:
+            filtered_df = filtered_df.filter(
+                (pl.col('date') >= pl.lit(date_start)) & (pl.col('date') <= pl.lit(date_end))
+            )
+
+        if filtered_df.is_empty():
+            return pn.pane.Markdown(
+                "No data to display in Explorer.",
+                css_classes=['no-data'],
+                sizing_mode="stretch_width"
+            )
+
+        # Convert to pandas for hvplot.explorer
+        df_pandas = filtered_df.to_pandas()
+
+        # Create an hvplot explorer
+        explorer = df_pandas.hvplot.explorer(
+            x='date',
+            y=['E', 'F', 'G', 'H'],
+            groupby=['region', 'C', 'D', 'A'],
+            height=600,
+            width=1000
+        )
+        return explorer
+
+    def update_explorer(self, *events):
+        self.view[0] = self.build_explorer()
+
+
+###############################
+# 7) Updated Dashboard
+###############################
 class Dashboard:
     def __init__(self, df):
         self.filter_selectors = FilterSelectors(df, on_change=self.on_filter_change)
         self.chart_view = ChartView(df, self.filter_selectors)
         self.table_view = TableView(df, self.filter_selectors)
+        self.gallery_view = GalleryView(df, self.filter_selectors)
+        self.explorer_view = ExplorerView(df, self.filter_selectors)
 
         self.tabs = pn.Tabs(
             ("Charts", self.chart_view.view),
             ("Table", self.table_view.view),
+            ("Gallery", self.gallery_view.view),
+            ("Explorer", self.explorer_view.view),
             sizing_mode="stretch_both"
         )
 
@@ -375,12 +585,13 @@ class Dashboard:
         self.chart_view.update_charts()
         self.table_view.update_table()
 
-
+###############################
+# 8) main()
+###############################
 def main():
     df_polars = generate_full_df()
     dashboard = Dashboard(df_polars)
 
-    # Dark-ish CSS
     CUSTOM_CSS = """
     body, .bk-root {
       background-color: #1e1e1e !important;
@@ -428,10 +639,14 @@ def main():
       padding: 10px !important;
     }
     .scrollable-charts {
-  overflow-y: auto; /* vertical scrollbar */
-  overflow-x: hidden; /* or auto if you want horizontal scroll */
-  height: 600px; /* or max-height: 600px; */
-}
+      overflow-y: auto;
+      overflow-x: hidden;
+      height: 600px;
+    }
+    .bk .bk-legend {
+      max-height: 300px !important;
+      overflow-y: auto !important;
+    }
     """
 
     template = pn.template.BootstrapTemplate(
@@ -439,10 +654,8 @@ def main():
         header_background='#2b2b2b'
     )
 
-    # Insert custom CSS
     template.header.append(pn.pane.HTML(f"<style>{CUSTOM_CSS}</style>"))
 
-    # The main content: filters row on top, then tabs below
     template.main.append(
         pn.Column(
             dashboard.filter_selectors.view,
