@@ -1,111 +1,137 @@
+from typing import TypedDict, Optional
+
 import panel as pn
 import holoviews as hv
 import polars as pl
 import numpy as np
 
+from keyboard_shortcuts import KeyboardShortcut, KeyboardShortcuts
+
 pn.extension(sizing_mode="stretch_width")
 hv.extension("bokeh")
 
-# Simulated Large Dataset (Replace with pl.scan_csv() for real files)
+
 TOTAL_ROWS = 100_000
-NUM_IDS = 10  # Unique identifiers
+NUM_IDS = 10
 
 df = pl.DataFrame({
     "id": np.random.choice([f"ID_{i}" for i in range(1, NUM_IDS + 1)], TOTAL_ROWS),
-    "x": np.linspace(0, 10, TOTAL_ROWS),
+    "x":  np.linspace(0, 10, TOTAL_ROWS),
     "y1": np.sin(np.linspace(0, 10, TOTAL_ROWS)),
     "y2": np.cos(np.linspace(0, 10, TOTAL_ROWS)),
 })
 
-# Get unique identifiers
 unique_ids = df["id"].unique().to_list()
 
-# UI Widgets
-selected_ids = pn.widgets.MultiChoice(name="Select Identifiers", options=unique_ids, value=[unique_ids[0]])
-current_index = pn.widgets.IntInput(name="Index", value=0, start=0, end=len(selected_ids.value) - 1)
-
-prev_button = pn.widgets.Button(name="Previous Identifier", button_type="primary")
-next_button = pn.widgets.Button(name="Next Identifier", button_type="primary")
+selected_ids  = pn.widgets.MultiChoice(
+    name="Select Identifiers",
+    options=unique_ids,
+    value=[unique_ids[0]]
+)
+current_index = pn.widgets.IntInput(
+    name="Index",
+    value=0,
+    start=0,
+    end=len(selected_ids.value) - 1
+)
 
 chart_display_1 = pn.Column()
 chart_display_2 = pn.Column()
 
+# ------------------------------------------------------------------
+# 3. Helpers to filter data and make charts
+# ------------------------------------------------------------------
 def get_filtered_data(identifier):
-    """Filters the DataFrame by a single identifier."""
+    """Return all rows for a single 'id'."""
     return df.filter(df["id"] == identifier)
 
 def generate_chart(identifier):
-    """Generates two HoloViews line plots for the selected identifier."""
-    filtered_df = get_filtered_data(identifier)
+    """Return two HoloViews curves for the given identifier."""
+    filtered = get_filtered_data(identifier)
+    if filtered.is_empty():
+        msg = "### No data for this identifier"
+        return pn.pane.Markdown(msg), pn.pane.Markdown(msg)
 
-    if filtered_df.is_empty():
-        return pn.pane.Markdown("### No data for this identifier"), pn.pane.Markdown("### No data for this identifier")
+    curve1 = hv.Curve(
+        (filtered["x"], filtered["y1"]),
+        label=f"Identifier {identifier} - Set 1"
+    ).opts(responsive=True, height=300, tools=[], active_tools=[], show_grid=True)
 
-    chart1 = hv.Curve((filtered_df["x"], filtered_df["y1"]), label=f"Identifier {identifier} - Set 1").opts(
-        responsive=True, height=300, tools=[], active_tools=[], show_grid=True
-    )
+    curve2 = hv.Curve(
+        (filtered["x"], filtered["y2"]),
+        label=f"Identifier {identifier} - Set 2"
+    ).opts(responsive=True, height=300, tools=[], active_tools=[], show_grid=True)
 
-    chart2 = hv.Curve((filtered_df["x"], filtered_df["y2"]), label=f"Identifier {identifier} - Set 2").opts(
-        responsive=True, height=300, tools=[], active_tools=[], show_grid=True
-    )
+    return pn.pane.HoloViews(curve1), pn.pane.HoloViews(curve2)
 
-    return pn.pane.HoloViews(chart1), pn.pane.HoloViews(chart2)
-
-def update_display(event=None):
-    """Updates the charts when switching between selected identifiers."""
+# ------------------------------------------------------------------
+# 4. Updating the display
+# ------------------------------------------------------------------
+def update_display(_=None):
+    """Update charts for the current identifier."""
     if not selected_ids.value:
         chart_display_1.objects = [pn.pane.Markdown("### No identifiers selected")]
         chart_display_2.objects = [pn.pane.Markdown("### No identifiers selected")]
         return
 
-    # Ensure index is within bounds
+    # Keep current_index within valid range
     current_index.end = max(0, len(selected_ids.value) - 1)
     if current_index.value > current_index.end:
         current_index.value = current_index.end
 
     identifier = selected_ids.value[current_index.value]
-    charts1, charts2 = generate_chart(identifier)
-    chart_display_1.objects = [charts1]
-    chart_display_2.objects = [charts2]
+    c1, c2 = generate_chart(identifier)
+    chart_display_1.objects = [c1]
+    chart_display_2.objects = [c2]
 
-# Navigation Functions
-def prev_page(event):
+# ------------------------------------------------------------------
+# 5. Navigate with ArrowUp/ArrowDown (no buttons)
+# ------------------------------------------------------------------
+def go_prev():
     if current_index.value > 0:
         current_index.value -= 1
         update_display()
 
-def next_page(event):
+def go_next():
     if current_index.value < len(selected_ids.value) - 1:
         current_index.value += 1
         update_display()
 
-prev_button.on_click(prev_page)
-next_button.on_click(next_page)
+# ------------------------------------------------------------------
+# 6. Define keyboard shortcuts & callback
+# ------------------------------------------------------------------
+shortcuts = [
+    KeyboardShortcut(name="prev", key="ArrowUp"),
+    KeyboardShortcut(name="next", key="ArrowDown"),
+]
+keyboard_events = KeyboardShortcuts(shortcuts=shortcuts)
+
+def handle_shortcut(event):
+    # event.data is the 'name' field from the matched KeyboardShortcut
+    if event.data == "prev":
+        go_prev()
+    elif event.data == "next":
+        go_next()
+
+keyboard_events.on_msg(handle_shortcut)
+
+# ------------------------------------------------------------------
+# 7. Watch changes in widgets, load initial display
+# ------------------------------------------------------------------
 selected_ids.param.watch(update_display, "value")
 current_index.param.watch(update_display, "value")
 
-# Initial Load
-update_display()
+update_display()  # Initial charts
 
-# JavaScript for Keyboard Navigation (Arrow Left/Right)
-keyboard_js = """
-document.addEventListener('keydown', function(event) {
-    if (event.key === 'ArrowRight') {
-        pyodide.runPython('next_page(None)');
-    } else if (event.key === 'ArrowLeft') {
-        pyodide.runPython('prev_page(None)');
-    }
-});
-"""
-
-# Attach JS + Layout
-js_code = pn.pane.HTML(f"<script>{keyboard_js}</script>", height=0)
-
+# ------------------------------------------------------------------
+# 8. Build layout: two rows of charts + the shortcuts component
+# ------------------------------------------------------------------
 layout = pn.Column(
-    pn.Row(selected_ids, current_index, align="center"),
-    pn.Row(prev_button, next_button, align="center"),
-    pn.Row(chart_display_1, chart_display_2),
-    js_code
+    pn.Row(selected_ids, current_index),
+    # Each chart in its own row
+    pn.Row(chart_display_1),
+    pn.Row(chart_display_2),
+    keyboard_events  # Must include for global key events to work
 )
 
 # Serve the app
